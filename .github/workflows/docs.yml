@@ -17,4 +17,4 @@ jobs:
       - name: Build & Deploy Docs
         run: moonwave build --publish
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PAGES_SECRET }}
