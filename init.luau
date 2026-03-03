@@ -3,16 +3,50 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
+--[=[
+	@type Scope string
+	@within ReplicatedData
+	A string identifier that groups related keys together.
+	For example, `"player_123"` or `"global"`.
+]=]
 export type Scope = string
+
+--[=[
+	@type Key string
+	@within ReplicatedData
+	A string identifier for a value within a [Scope].
+]=]
 export type Key = string
+
+--[=[
+	@type Value any
+	@within ReplicatedData
+	Any value that can be stored and replicated.
+]=]
 export type Value = any
+
+--[=[
+	@type ChangeCallback (newValue: Value, oldValue: Value, key: Key, scope: Scope) -> ()
+	@within ReplicatedData
+	Callback fired when a value changes. Receives the new value, the old value,
+	and the key/scope that changed.
+]=]
 export type ChangeCallback = (newValue: Value, oldValue: Value, key: Key, scope: Scope) -> ()
+
+--[=[
+	@type Middleware (key: Key, scope: Scope, newValue: Value, oldValue: Value) -> (boolean, Value?)
+	@within ReplicatedData
+	A function that intercepts writes before they are applied.
+
+	Return `false` to block the write entirely.
+	Return `true, transformedValue` to allow the write with an optionally transformed value.
+	Return `true` (no second return) to allow the write unchanged.
+]=]
 export type Middleware = (key: Key, scope: Scope, newValue: Value, oldValue: Value) -> (boolean, Value?)
 
 local Signal = require(ReplicatedStorage.Packages.Signal)
 local Network = require(script.Network)
 
--- ─── Internal store ──────────────────────────────────────────────────────────
 local store: { [Scope]: { [Key]: Value } } = {}
 local keyListeners: { [string]: { ChangeCallback } } = {}
 local scopeListeners: { [Scope]: { ChangeCallback } } = {}
@@ -63,16 +97,54 @@ local function runMiddleware(key: Key, scope: Scope, newVal: Value, oldVal: Valu
 	return true, final
 end
 
--- ─── Module ──────────────────────────────────────────────────────────────────
 --[=[
 	@class ReplicatedData
 
-	This is the ReplicatedData class.
+	ReplicatedData is a server-authoritative key/value store that automatically
+	replicates data from the server to clients.
+
+	**Setup** — call both sync methods once at game startup:
+```lua
+	-- In a Script (server):
+	ReplicatedData:_ensureServerSync()
+
+	-- In a LocalScript (client):
+	ReplicatedData:_ensureClientSync()
+```
+
+	**Basic usage:**
+```lua
+	-- Server
+	ReplicatedData:Set("coins", "player_123", 500)
+
+	-- Client
+	print(ReplicatedData:Get("coins", "player_123")) --> 500
+```
 ]=]
 local ReplicatedData = {}
 ReplicatedData.__index = ReplicatedData
+
+--[=[
+	@prop Signal Signal
+	@within ReplicatedData
+	@private
+	Internal signal used to bridge data changes to the network layer.
+	Fires `"diff"` on a set and `"delete"` on a delete.
+]=]
 ReplicatedData.Signal = Signal.new()
 
+-- ── Bridge ────────────────────────────────────────────────────────────────────
+
+--[=[
+	@private
+	Writes a value directly to the store, bypassing middleware.
+	Fires listeners and the internal Signal. Used by the networking layer.
+
+	@param key Key
+	@param scope Scope
+	@param value Value
+	@return boolean -- Whether the value actually changed
+]=]
 function ReplicatedData._applySet(key: Key, scope: Scope, value: Value): boolean
 	ensureScope(scope)
 	local old = store[scope][key]
@@ -81,21 +153,35 @@ function ReplicatedData._applySet(key: Key, scope: Scope, value: Value): boolean
 	end
 	store[scope][key] = value
 	fireListeners(key, scope, value, old)
-
 	ReplicatedData.Signal:Fire("diff", key, scope, value, old)
 	return true
 end
 
+--[=[
+	@private
+	Deletes a key directly from the store, bypassing middleware.
+	Fires listeners and the internal Signal. Used by the networking layer.
+
+	@param key Key
+	@param scope Scope
+]=]
 function ReplicatedData._applyDelete(key: Key, scope: Scope)
 	ensureScope(scope)
 	local old = store[scope][key]
 	store[scope][key] = nil
 	fireListeners(key, scope, nil, old)
-
 	ReplicatedData.Signal:Fire("delete", key, scope)
 	return true
 end
 
+--[=[
+	@private
+	Replaces an entire scope's data in one operation, bypassing middleware.
+	Used by the client during initial sync to apply the server snapshot.
+
+	@param scope Scope
+	@param data { [Key]: Value }
+]=]
 function ReplicatedData._applyBulk(scope: Scope, data: { [Key]: Value })
 	store[scope] = data
 	for k, v in data do
@@ -105,25 +191,51 @@ end
 
 -- ── Read ──────────────────────────────────────────────────────────────────────
 
---- Gets a value from the store.
---- @param key string -- The key to look up
---- @param scope string -- The scope to search in
---- @return any -- The stored value, or nil
+--[=[
+	Returns the value stored at `key` within `scope`, or `nil` if not set.
+```lua
+	local coins = ReplicatedData:Get("coins", "player_123")
+```
+
+	@param key Key
+	@param scope Scope
+	@return Value
+]=]
 function ReplicatedData:Get(key: Key, scope: Scope): Value
 	return store[scope] and store[scope][key]
 end
 
+--[=[
+	Yields until `key` within `scope` is non-nil, then returns the value.
+	Polls every 0.1 seconds.
+```lua
+	local data = ReplicatedData:WaitFor("initialized", "global")
+```
+
+	@yields
+	@param key Key
+	@param scope Scope
+	@return Value
+]=]
 function ReplicatedData:WaitFor(key: Key, scope: Scope): Value
 	local value = self:Get(key, scope)
-
 	repeat
 		value = self:Get(key, scope)
 		task.wait(0.1)
 	until value ~= nil
-
 	return value
 end
 
+--[=[
+	Returns a shallow copy of all key/value pairs in `scope`.
+	Returns an empty table if the scope does not exist.
+```lua
+	local playerData = ReplicatedData:GetScope("player_123")
+```
+
+	@param scope Scope
+	@return { [Key]: Value }
+]=]
 function ReplicatedData:GetScope(scope: Scope): { [Key]: Value }
 	local copy = {}
 	if store[scope] then
@@ -134,6 +246,14 @@ function ReplicatedData:GetScope(scope: Scope): { [Key]: Value }
 	return copy
 end
 
+--[=[
+	Returns a shallow copy of the entire store across all scopes.
+```lua
+	local everything = ReplicatedData:GetAll()
+```
+
+	@return { [Scope]: { [Key]: Value } }
+]=]
 function ReplicatedData:GetAll(): { [Scope]: { [Key]: Value } }
 	local copy = {}
 	for s, keys in store do
@@ -145,10 +265,23 @@ function ReplicatedData:GetAll(): { [Scope]: { [Key]: Value } }
 	return copy
 end
 
+--[=[
+	Returns `true` if `key` exists in `scope`, even when its value is `false` or `0`.
+
+	@param key Key
+	@param scope Scope
+	@return boolean
+]=]
 function ReplicatedData:Has(key: Key, scope: Scope): boolean
 	return store[scope] ~= nil and store[scope][key] ~= nil
 end
 
+--[=[
+	Returns an array of all keys present in `scope`.
+
+	@param scope Scope
+	@return { Key }
+]=]
 function ReplicatedData:Keys(scope: Scope): { Key }
 	local keys = {}
 	if store[scope] then
@@ -159,6 +292,11 @@ function ReplicatedData:Keys(scope: Scope): { Key }
 	return keys
 end
 
+--[=[
+	Returns an array of all known scope names.
+
+	@return { Scope }
+]=]
 function ReplicatedData:Scopes(): { Scope }
 	local scopes = {}
 	for s in store do
@@ -169,6 +307,24 @@ end
 
 -- ── Write ─────────────────────────────────────────────────────────────────────
 
+--[=[
+	Sets `key` in `scope` to `value`. Runs the middleware stack before applying.
+	Returns `true` if the value changed, `false` if it was blocked or unchanged.
+
+	:::caution Server only
+	Writes should only originate on the server. The server will automatically
+	replicate the change to all eligible clients.
+	:::
+```lua
+	ReplicatedData:Set("coins", "player_123", 500)
+```
+
+	@server
+	@param key Key
+	@param scope Scope
+	@param value Value
+	@return boolean
+]=]
 function ReplicatedData:Set(key: Key, scope: Scope, value: Value): boolean
 	ensureScope(scope)
 	local old = store[scope][key]
@@ -179,10 +335,39 @@ function ReplicatedData:Set(key: Key, scope: Scope, value: Value): boolean
 	return ReplicatedData._applySet(key, scope, final)
 end
 
+--[=[
+	Applies `updater` to the current value of `key` in `scope` and sets the result.
+	`updater` receives the current value (or `nil`) and should return the new value.
+```lua
+	ReplicatedData:Update("coins", "player_123", function(current)
+		return (current or 0) + 100
+	end)
+```
+
+	@server
+	@param key Key
+	@param scope Scope
+	@param updater (current: Value) -> Value
+	@return boolean
+]=]
 function ReplicatedData:Update(key: Key, scope: Scope, updater: (current: Value) -> Value): boolean
 	return self:Set(key, scope, updater(self:Get(key, scope)))
 end
 
+--[=[
+	Increments a numeric key by `amount` (default `1`).
+	If the key is not yet set, it starts from `0`.
+```lua
+	ReplicatedData:Increment("kills", "player_123")       -- +1
+	ReplicatedData:Increment("kills", "player_123", 5)    -- +5
+```
+
+	@server
+	@param key Key
+	@param scope Scope
+	@param amount number? -- Defaults to 1
+	@return boolean
+]=]
 function ReplicatedData:Increment(key: Key, scope: Scope, amount: number?): boolean
 	local n = amount or 1
 	return self:Update(key, scope, function(v)
@@ -190,10 +375,23 @@ function ReplicatedData:Increment(key: Key, scope: Scope, amount: number?): bool
 	end)
 end
 
+--[=[
+	Deletes `key` from `scope`. Fires listeners with `nil` as the new value.
+
+	@server
+	@param key Key
+	@param scope Scope
+]=]
 function ReplicatedData:Delete(key: Key, scope: Scope)
 	ReplicatedData._applyDelete(key, scope)
 end
 
+--[=[
+	Deletes every key in `scope`, then removes the scope itself.
+
+	@server
+	@param scope Scope
+]=]
 function ReplicatedData:DeleteScope(scope: Scope)
 	if not store[scope] then
 		return
@@ -206,10 +404,32 @@ end
 
 -- ── Batch ─────────────────────────────────────────────────────────────────────
 
+--[=[
+	Begins a batch operation. All subsequent [ReplicatedData.BatchSet] calls will be
+	queued rather than applied immediately. Call [ReplicatedData.CommitBatch] to apply
+	or [ReplicatedData.RollbackBatch] to discard.
+```lua
+	ReplicatedData:BeginBatch()
+	ReplicatedData:BatchSet("hp",  "player_123", 100)
+	ReplicatedData:BatchSet("mp",  "player_123", 50)
+	ReplicatedData:CommitBatch()
+```
+
+	@server
+]=]
 function ReplicatedData:BeginBatch()
 	isBatching = true
 end
 
+--[=[
+	Queues a write when inside a batch (after [ReplicatedData.BeginBatch]).
+	Falls through to [ReplicatedData.Set] immediately if no batch is active.
+
+	@server
+	@param key Key
+	@param scope Scope
+	@param value Value
+]=]
 function ReplicatedData:BatchSet(key: Key, scope: Scope, value: Value)
 	if isBatching then
 		table.insert(batchQueue, { scope = scope, key = key, value = value })
@@ -218,6 +438,13 @@ function ReplicatedData:BatchSet(key: Key, scope: Scope, value: Value)
 	end
 end
 
+--[=[
+	Applies all queued batch writes and ends the batch.
+	Returns the number of keys that actually changed.
+
+	@server
+	@return number
+]=]
 function ReplicatedData:CommitBatch(): number
 	isBatching = false
 	local changed = 0
@@ -230,6 +457,11 @@ function ReplicatedData:CommitBatch(): number
 	return changed
 end
 
+--[=[
+	Discards all queued batch writes and ends the batch without applying anything.
+
+	@server
+]=]
 function ReplicatedData:RollbackBatch()
 	isBatching = false
 	batchQueue = {}
@@ -237,10 +469,32 @@ end
 
 -- ── Middleware ────────────────────────────────────────────────────────────────
 
+--[=[
+	Registers a [Middleware] handler. Handlers are executed in insertion order
+	on every [ReplicatedData.Set] and [ReplicatedData.Update] call.
+
+	Middleware does **not** run on internal `_apply*` bridge calls.
+```lua
+	-- Clamp coins between 0 and 99999
+	ReplicatedData:UseMiddleware(function(key, scope, new, old)
+		if key == "coins" then
+			return true, math.clamp(new, 0, 99999)
+		end
+		return true
+	end)
+```
+
+	@param handler Middleware
+]=]
 function ReplicatedData:UseMiddleware(handler: Middleware)
 	table.insert(middlewareStack, handler)
 end
 
+--[=[
+	Removes a previously registered [Middleware] handler.
+
+	@param handler Middleware
+]=]
 function ReplicatedData:RemoveMiddleware(handler: Middleware)
 	for i, mw in middlewareStack do
 		if mw == handler then
@@ -252,6 +506,23 @@ end
 
 -- ── Subscriptions ─────────────────────────────────────────────────────────────
 
+--[=[
+	Subscribes to changes on a specific `key` within `scope`.
+	Returns a function that disconnects the listener when called.
+```lua
+	local disconnect = ReplicatedData:OnChange("coins", "player_123", function(new, old)
+		print("Coins changed from", old, "to", new)
+	end)
+
+	-- Later:
+	disconnect()
+```
+
+	@param key Key
+	@param scope Scope
+	@param callback ChangeCallback
+	@return () -> ()
+]=]
 function ReplicatedData:OnChange(key: Key, scope: Scope, callback: ChangeCallback): () -> ()
 	local lid = makeId(scope, key)
 	if not keyListeners[lid] then
@@ -268,6 +539,19 @@ function ReplicatedData:OnChange(key: Key, scope: Scope, callback: ChangeCallbac
 	end
 end
 
+--[=[
+	Subscribes to changes on **any** key within `scope`.
+	Returns a function that disconnects the listener when called.
+```lua
+	local disconnect = ReplicatedData:OnScopeChange("player_123", function(new, old, key)
+		print(key, "changed to", new)
+	end)
+```
+
+	@param scope Scope
+	@param callback ChangeCallback
+	@return () -> ()
+]=]
 function ReplicatedData:OnScopeChange(scope: Scope, callback: ChangeCallback): () -> ()
 	if not scopeListeners[scope] then
 		scopeListeners[scope] = {}
@@ -283,6 +567,13 @@ function ReplicatedData:OnScopeChange(scope: Scope, callback: ChangeCallback): (
 	end
 end
 
+--[=[
+	Subscribes to **every** change in the entire store, regardless of scope or key.
+	Returns a function that disconnects the listener when called.
+
+	@param callback ChangeCallback
+	@return () -> ()
+]=]
 function ReplicatedData:OnAnyChange(callback: ChangeCallback): () -> ()
 	table.insert(globalListeners, callback)
 	return function()
@@ -295,11 +586,39 @@ function ReplicatedData:OnAnyChange(callback: ChangeCallback): () -> ()
 	end
 end
 
+--[=[
+	Subscribes to `key` in `scope` and **immediately fires** `callback` with the
+	current value. Useful for initialising UI without separate init logic.
+```lua
+	ReplicatedData:Observe("coins", "player_123", function(new)
+		coinsLabel.Text = tostring(new)
+	end)
+```
+
+	@param key Key
+	@param scope Scope
+	@param callback ChangeCallback
+	@return () -> ()
+]=]
 function ReplicatedData:Observe(key: Key, scope: Scope, callback: ChangeCallback): () -> ()
 	task.spawn(callback, self:Get(key, scope), nil, key, scope)
 	return self:OnChange(key, scope, callback)
 end
 
+--[=[
+	Subscribes to `key` in `scope` and **automatically disconnects** after the
+	first change fires.
+```lua
+	ReplicatedData:Once("ready", "global", function(new)
+		print("Game is ready:", new)
+	end)
+```
+
+	@param key Key
+	@param scope Scope
+	@param callback ChangeCallback
+	@return () -> () -- Disconnect function (if you need to cancel before it fires)
+]=]
 function ReplicatedData:Once(key: Key, scope: Scope, callback: ChangeCallback): () -> ()
 	local disconnect: (() -> ())?
 	disconnect = self:OnChange(key, scope, function(newVal, oldVal, k, s)
@@ -311,16 +630,40 @@ function ReplicatedData:Once(key: Key, scope: Scope, callback: ChangeCallback): 
 	return disconnect :: () -> ()
 end
 
--- ── Replication Filtering ─────────────────────────────────────────────────────────────
+-- ── Replication Filtering ─────────────────────────────────────────────────────
+
+--[=[
+	Sets a filter function for `scope` that controls which players receive its data.
+
+	The filter runs on every write and on the initial sync for joining players.
+	Return `true` to allow replication to that player, `false` to hide it.
+```lua
+	-- Only replicate a player's own data back to them
+	ReplicatedData:SetScopeFilter("player_123", function(player, key, value)
+		return player.UserId == 123
+	end)
+```
+
+	@server
+	@param scope Scope
+	@param fn (player: Player, key: Key, value: Value) -> boolean
+]=]
 function ReplicatedData:SetScopeFilter(scope: Scope, fn: (player: Player, key: Key, value: Value) -> boolean)
 	scopeFilters[scope] = fn
 end
 
+--[=[
+	Removes the replication filter for `scope`, allowing all players to receive it.
+
+	@server
+	@param scope Scope
+]=]
 function ReplicatedData:RemoveScopeFilter(scope: Scope)
 	scopeFilters[scope] = nil
 end
 
--- ── Syncing ─────────────────────────────────────────────────────────────
+-- ── Syncing ───────────────────────────────────────────────────────────────────
+
 local function getEligiblePlayers(scope: Scope, key: Key, value: Value): { Player }
 	local filter = scopeFilters[scope]
 	if not filter then
@@ -335,6 +678,18 @@ local function getEligiblePlayers(scope: Scope, key: Key, value: Value): { Playe
 	return eligible
 end
 
+--[=[
+	Initialises server-side replication. Must be called once from a `Script`.
+
+	- Listens for store changes and pushes deltas to eligible clients.
+	- Sends a filtered full snapshot to each player when they join.
+```lua
+	-- In a server Script:
+	ReplicatedData:_ensureServerSync()
+```
+
+	@server
+]=]
 function ReplicatedData:_ensureServerSync()
 	if RunService:IsServer() then
 		local function diff(key: string, scope: string, newValue: any, oldValue: any)
@@ -361,29 +716,41 @@ function ReplicatedData:_ensureServerSync()
 			end
 		end)
 
-        Players.PlayerAdded:Connect(function(player)
-            local fullSnapshot = ReplicatedData:GetAll()
-            local filtered: { [Scope]: { [Key]: Value } } = {}
+		Players.PlayerAdded:Connect(function(player)
+			local fullSnapshot = ReplicatedData:GetAll()
+			local filtered: { [Scope]: { [Key]: Value } } = {}
 
-            for scope, keys in fullSnapshot do
-                local filter = scopeFilters[scope]
-                filtered[scope] = {}
-                for key, value in keys do
-                    if not filter or filter(player, key, value) then
-                        filtered[scope][key] = value
-                    end
-                end
-            end
+			for scope, keys in fullSnapshot do
+				local filter = scopeFilters[scope]
+				filtered[scope] = {}
+				for key, value in keys do
+					if not filter or filter(player, key, value) then
+						filtered[scope][key] = value
+					end
+				end
+			end
 
-            Network.packets.sync.sendTo({
-                snapshot = filtered
-            }, player)
-        end)
+			Network.packets.sync.sendTo({
+				snapshot = filtered,
+			}, player)
+		end)
 
 		print("RD is syncing on the server.")
 	end
 end
 
+--[=[
+	Initialises client-side replication. Must be called once from a `LocalScript`.
+
+	- Applies the full snapshot received on join.
+	- Listens for incremental set/delete packets from the server.
+```lua
+	-- In a client LocalScript:
+	ReplicatedData:_ensureClientSync()
+```
+
+	@client
+]=]
 function ReplicatedData:_ensureClientSync()
 	if RunService:IsClient() then
 		Network.packets.sync.listen(function(data: { snapshot: any })
@@ -405,7 +772,11 @@ function ReplicatedData:_ensureClientSync()
 	end
 end
 
--- ── Dev reset ─────────────────────────────────────────────────────────────────
+--[=[
+	@private
+	Wipes all store data and resets all internal state.
+	Intended for use in tests or hot-reload scenarios only.
+]=]
 function ReplicatedData:_reset()
 	store = {}
 	keyListeners = {}
