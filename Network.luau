@@ -23,6 +23,6 @@ return ByteNet.defineNamespace("replicated_data", function()
 					snapshot = ByteNet.unknown,
 				}),
 			}),
-		},
+		}
 	}
 end)
