@@ -65,6 +65,11 @@ local function runMiddleware(key: Key, scope: Scope, newVal: Value, oldVal: Valu
 end
 
 -- ─── Module ──────────────────────────────────────────────────────────────────
+--[=[
+	@class ReplicatedData
+
+	This is the ReplicatedData class.
+]=]
 local ReplicatedData = {}
 ReplicatedData.__index = ReplicatedData
 ReplicatedData.Signal = Signal.new()
