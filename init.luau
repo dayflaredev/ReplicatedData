@@ -102,24 +102,6 @@ end
 
 	ReplicatedData is a server-authoritative key/value store that automatically
 	replicates data from the server to clients.
-
-	**Setup** — call both sync methods once at game startup:
-```lua
-	-- In a Script (server):
-	ReplicatedData:_ensureServerSync()
-
-	-- In a LocalScript (client):
-	ReplicatedData:_ensureClientSync()
-```
-
-	**Basic usage:**
-```lua
-	-- Server
-	ReplicatedData:Set("coins", "player_123", 500)
-
-	-- Client
-	print(ReplicatedData:Get("coins", "player_123")) --> 500
-```
 ]=]
 local ReplicatedData = {}
 ReplicatedData.__index = ReplicatedData
@@ -193,9 +175,6 @@ end
 
 --[=[
 	Returns the value stored at `key` within `scope`, or `nil` if not set.
-```lua
-	local coins = ReplicatedData:Get("coins", "player_123")
-```
 
 	@param key Key
 	@param scope Scope
@@ -208,9 +187,6 @@ end
 --[=[
 	Yields until `key` within `scope` is non-nil, then returns the value.
 	Polls every 0.1 seconds.
-```lua
-	local data = ReplicatedData:WaitFor("initialized", "global")
-```
 
 	@yields
 	@param key Key
@@ -229,9 +205,6 @@ end
 --[=[
 	Returns a shallow copy of all key/value pairs in `scope`.
 	Returns an empty table if the scope does not exist.
-```lua
-	local playerData = ReplicatedData:GetScope("player_123")
-```
 
 	@param scope Scope
 	@return { [Key]: Value }
@@ -248,10 +221,6 @@ end
 
 --[=[
 	Returns a shallow copy of the entire store across all scopes.
-```lua
-	local everything = ReplicatedData:GetAll()
-```
-
 	@return { [Scope]: { [Key]: Value } }
 ]=]
 function ReplicatedData:GetAll(): { [Scope]: { [Key]: Value } }
@@ -315,9 +284,6 @@ end
 	Writes should only originate on the server. The server will automatically
 	replicate the change to all eligible clients.
 	:::
-```lua
-	ReplicatedData:Set("coins", "player_123", 500)
-```
 
 	@server
 	@param key Key
@@ -338,11 +304,6 @@ end
 --[=[
 	Applies `updater` to the current value of `key` in `scope` and sets the result.
 	`updater` receives the current value (or `nil`) and should return the new value.
-```lua
-	ReplicatedData:Update("coins", "player_123", function(current)
-		return (current or 0) + 100
-	end)
-```
 
 	@server
 	@param key Key
@@ -357,10 +318,6 @@ end
 --[=[
 	Increments a numeric key by `amount` (default `1`).
 	If the key is not yet set, it starts from `0`.
-```lua
-	ReplicatedData:Increment("kills", "player_123")       -- +1
-	ReplicatedData:Increment("kills", "player_123", 5)    -- +5
-```
 
 	@server
 	@param key Key
@@ -408,12 +365,6 @@ end
 	Begins a batch operation. All subsequent [ReplicatedData.BatchSet] calls will be
 	queued rather than applied immediately. Call [ReplicatedData.CommitBatch] to apply
 	or [ReplicatedData.RollbackBatch] to discard.
-```lua
-	ReplicatedData:BeginBatch()
-	ReplicatedData:BatchSet("hp",  "player_123", 100)
-	ReplicatedData:BatchSet("mp",  "player_123", 50)
-	ReplicatedData:CommitBatch()
-```
 
 	@server
 ]=]
@@ -474,15 +425,6 @@ end
 	on every [ReplicatedData.Set] and [ReplicatedData.Update] call.
 
 	Middleware does **not** run on internal `_apply*` bridge calls.
-```lua
-	-- Clamp coins between 0 and 99999
-	ReplicatedData:UseMiddleware(function(key, scope, new, old)
-		if key == "coins" then
-			return true, math.clamp(new, 0, 99999)
-		end
-		return true
-	end)
-```
 
 	@param handler Middleware
 ]=]
@@ -509,14 +451,7 @@ end
 --[=[
 	Subscribes to changes on a specific `key` within `scope`.
 	Returns a function that disconnects the listener when called.
-```lua
-	local disconnect = ReplicatedData:OnChange("coins", "player_123", function(new, old)
-		print("Coins changed from", old, "to", new)
-	end)
 
-	-- Later:
-	disconnect()
-```
 
 	@param key Key
 	@param scope Scope
@@ -542,11 +477,6 @@ end
 --[=[
 	Subscribes to changes on **any** key within `scope`.
 	Returns a function that disconnects the listener when called.
-```lua
-	local disconnect = ReplicatedData:OnScopeChange("player_123", function(new, old, key)
-		print(key, "changed to", new)
-	end)
-```
 
 	@param scope Scope
 	@param callback ChangeCallback
@@ -589,11 +519,6 @@ end
 --[=[
 	Subscribes to `key` in `scope` and **immediately fires** `callback` with the
 	current value. Useful for initialising UI without separate init logic.
-```lua
-	ReplicatedData:Observe("coins", "player_123", function(new)
-		coinsLabel.Text = tostring(new)
-	end)
-```
 
 	@param key Key
 	@param scope Scope
@@ -608,11 +533,6 @@ end
 --[=[
 	Subscribes to `key` in `scope` and **automatically disconnects** after the
 	first change fires.
-```lua
-	ReplicatedData:Once("ready", "global", function(new)
-		print("Game is ready:", new)
-	end)
-```
 
 	@param key Key
 	@param scope Scope
@@ -637,12 +557,6 @@ end
 
 	The filter runs on every write and on the initial sync for joining players.
 	Return `true` to allow replication to that player, `false` to hide it.
-```lua
-	-- Only replicate a player's own data back to them
-	ReplicatedData:SetScopeFilter("player_123", function(player, key, value)
-		return player.UserId == 123
-	end)
-```
 
 	@server
 	@param scope Scope
@@ -683,10 +597,6 @@ end
 
 	- Listens for store changes and pushes deltas to eligible clients.
 	- Sends a filtered full snapshot to each player when they join.
-```lua
-	-- In a server Script:
-	ReplicatedData:_ensureServerSync()
-```
 
 	@server
 ]=]
@@ -744,10 +654,6 @@ end
 
 	- Applies the full snapshot received on join.
 	- Listens for incremental set/delete packets from the server.
-```lua
-	-- In a client LocalScript:
-	ReplicatedData:_ensureClientSync()
-```
 
 	@client
 ]=]
